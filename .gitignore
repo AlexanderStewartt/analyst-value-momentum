@@ -1,5 +1,6 @@
 # Ignore WRDS data files
 data/*.csv
+!data/sp500_ticker_start_end.csv
 
 # Ignore Python cache files
 __pycache__/

@@ -1,533 +1,277 @@
 import pandas as pd
+import matplotlib.pyplot as plt
+from scipy import stats
+import numpy as np
 
 
-CRSP_FILE = "data/crsp_prices.csv"
-IBES_FILE = "data/ibes_targets.csv"
+CRSP_FILE = "data/weekly_crsp_panel.csv"
+ANALYST_FILE = "data/weekly_analyst_consensus.csv"
 
 
-def load_crsp_data(file_path):
+def load_crsp(file_path):
     """
-    Load CRSP daily stock data.
+    Load the processed weekly CRSP panel.
     """
+
     df = pd.read_csv(file_path)
 
-    # Make column names easier to work with
     df.columns = df.columns.str.strip().str.lower()
 
-    return df
-
-
-def load_ibes_data(file_path):
-    """
-    Load I/B/E/S analyst price target data.
-    """
-    df = pd.read_csv(file_path)
-
-    # Make column names easier to work with
-    df.columns = df.columns.str.strip().str.lower()
-
-    return df
-
-
-def clean_crsp_data(df):
-    """
-    Basic cleaning for CRSP data.
-    """
-
-    # Convert date column into actual datetime objects
-    if "dlycaldt" in df.columns:
-        df["dlycaldt"] = pd.to_datetime(df["dlycaldt"])
-
-    # Make ticker consistently uppercase
-    if "ticker" in df.columns:
-        df["ticker"] = df["ticker"].astype(str).str.strip().str.upper()
-
-    return df
-
-
-def clean_ibes_data(df):
-    """
-    Clean I/B/E/S analyst target data.
-    """
-
-    df = df.copy()
-
-    if "actdats" in df.columns:
-        df["actdats"] = pd.to_datetime(
-            df["actdats"],
-            errors="coerce"
-        )
-
-    if "anndats" in df.columns:
-        df["anndats"] = pd.to_datetime(
-            df["anndats"],
-            errors="coerce"
-        )
-
-    if "ticker" in df.columns:
-        df["ticker"] = (
-            df["ticker"]
-            .astype(str)
-            .str.strip()
-            .str.upper()
-        )
-
-    if "oftic" in df.columns:
-        df["oftic"] = (
-            df["oftic"]
-            .astype(str)
-            .str.strip()
-            .str.upper()
-        )
-
-    if "alysnam" in df.columns:
-        df["alysnam"] = (
-            df["alysnam"]
-            .astype(str)
-            .str.strip()
-        )
-
-    df["value"] = pd.to_numeric(
-        df["value"],
+    df["signal_date"] = pd.to_datetime(
+        df["signal_date"],
         errors="coerce"
     )
 
-    return df
-
-def calculate_returns(crsp):
-    """
-    Calculate previous 5-day return and
-    subsequent 5-day return for each stock.
-    """
-
-    crsp = crsp.sort_values(["permno", "dlycaldt"]).copy()
-
-    crsp["dlyret"] = pd.to_numeric(
-        crsp["dlyret"],
+    df["permno"] = pd.to_numeric(
+        df["permno"],
         errors="coerce"
     )
 
-    # Previous 5 trading days, including today
-    crsp["prior_5d_return"] = (
-        crsp.groupby("permno")["dlyret"]
-        .transform(
-            lambda returns:
-                (1 + returns)
-                .rolling(5)
-                .apply(lambda x: x.prod() - 1, raw=True)
-        )
-    )
-
-    # Next 5 trading days, starting tomorrow
-    crsp["next_5d_return"] = (
-        crsp.groupby("permno")["dlyret"]
-        .transform(
-            lambda returns:
-                (1 + returns)
-                .rolling(5)
-                .apply(lambda x: x.prod() - 1, raw=True)
-                .shift(-5)
-        )
-    )
-
-    return crsp
-
-def inspect_data(crsp, ibes):
-    """
-    Print basic information so we can confirm
-    that the datasets loaded correctly.
-    """
-
-    print("\n========== CRSP DATA ==========")
-    print("Shape:", crsp.shape)
-
-    print("\nColumns:")
-    print(crsp.columns.tolist())
-
-    print("\nFirst 5 rows:")
-    print(crsp.head())
-
-    print("\nTickers:")
-    if "ticker" in crsp.columns:
-        print(crsp["ticker"].unique())
-
-    print("\n========== IBES DATA ==========")
-    print("Shape:", ibes.shape)
-
-    print("\nColumns:")
-    print(ibes.columns.tolist())
-
-    print("\nFirst 5 rows:")
-    print(ibes.head())
-
-    print("\nTickers:")
-    if "ticker" in ibes.columns:
-        print(ibes["ticker"].unique())
-
-def save_clean_crsp(crsp, output_path):
-    """
-    Save the cleaned CRSP dataset with the variables
-    needed for the momentum study.
-    """
-
-    columns_to_keep = [
-        "permno",
-        "ticker",
-        "securitynm",
-        "dlycaldt",
+    numeric_columns = [
         "dlyprc",
         "dlycap",
-        "dlyret",
-        "sprtrn",
         "prior_5d_return",
-        "next_5d_return"
+        "next_5d_return",
+        "next_5d_market_return",
+        "next_5d_excess_return"
     ]
 
-    clean = crsp[columns_to_keep].copy()
+    for column in numeric_columns:
+        df[column] = pd.to_numeric(
+            df[column],
+            errors="coerce"
+        )
 
-    clean.to_csv(output_path, index=False)
+    return df
 
-    print(f"\nSaved cleaned CRSP data to: {output_path}")
-    print("Rows saved:", len(clean))
 
-def create_weekly_signals(crsp):
+def load_analyst_consensus(file_path):
     """
-    Keep only the final trading day of each week.
-
-    prior_5d_return:
-        return over the 5 trading days ending on signal_date
-
-    next_5d_return:
-        return over the next 5 trading days after signal_date
+    Load the processed weekly analyst consensus.
     """
 
-    crsp = crsp.sort_values(["permno", "dlycaldt"]).copy()
+    df = pd.read_csv(file_path)
 
-    # Each period ends on Friday.
-    # If Friday is a holiday, the final trading day might be Thursday.
-    crsp["week"] = crsp["dlycaldt"].dt.to_period("W-FRI")
+    df.columns = df.columns.str.strip().str.lower()
 
-    weekly = (
-        crsp.groupby(["permno", "week"], as_index=False)
-        .tail(1)
-        .copy()
+    df["signal_date"] = pd.to_datetime(
+        df["signal_date"],
+        errors="coerce"
     )
 
-    weekly = weekly.rename(
-        columns={"dlycaldt": "signal_date"}
+    df["permno"] = pd.to_numeric(
+        df["permno"],
+        errors="coerce"
     )
 
-    weekly = weekly.drop(columns=["week"])
-
-    return weekly
-
-def build_analyst_consensus(
-    weekly,
-    ibes,
-    lookback_days=30
-):
-    """
-    Construct a point-in-time analyst consensus for every
-    stock-week.
-
-    For each signal date:
-        1. Look backward lookback_days.
-        2. For each analyst, use ONLY their most recent target.
-        3. Give all analysts equal weight.
-        4. Calculate consensus statistics.
-
-    ACTDATS is treated as the date the estimate became
-    available to us.
-    """
-
-    # For our initial prototype, use OFTIC because it tends to
-    # correspond more closely with the CRSP trading ticker.
-    analyst_data = ibes[
-        [
-            "oftic",
-            "actdats",
-            "alysnam",
-            "value"
-        ]
-    ].copy()
-
-    analyst_data = analyst_data.rename(
-        columns={"oftic": "ticker"}
-    )
-
-    analyst_data = analyst_data.dropna(
-        subset=[
-            "ticker",
-            "actdats",
-            "alysnam",
-            "value"
-        ]
-    )
-
-    analyst_data = analyst_data[
-        analyst_data["value"] > 0
+    numeric_columns = [
+        "consensus_target",
+        "analyst_count",
+        "target_std",
+        "previous_consensus",
+        "target_revision_1w"
     ]
 
-    results = []
-
-    # Processing one ticker at a time keeps memory usage reasonable
-    # when we eventually scale to hundreds of companies.
-    for ticker, stock_weeks in weekly.groupby("ticker"):
-
-        stock_targets = analyst_data[
-            analyst_data["ticker"] == ticker
-        ].copy()
-
-        if stock_targets.empty:
-            continue
-
-        stock_weeks = (
-            stock_weeks[
-                ["ticker", "signal_date"]
-            ]
-            .drop_duplicates()
-            .sort_values("signal_date")
+    for column in numeric_columns:
+        df[column] = pd.to_numeric(
+            df[column],
+            errors="coerce"
         )
 
-        analysts = stock_targets[
-            "alysnam"
-        ].drop_duplicates()
+    return df
 
-        # Create:
-        #
-        # every signal date × every analyst covering the company
-        #
-        grid = (
-            stock_weeks.assign(key=1)
-            .merge(
-                pd.DataFrame(
-                    {
-                        "alysnam": analysts,
-                        "key": 1
-                    }
-                ),
-                on="key"
-            )
-            .drop(columns="key")
-        )
 
-        grid = grid.sort_values(
-            ["signal_date", "alysnam"]
-        )
-
-        stock_targets = stock_targets.sort_values(
-            ["actdats", "alysnam"]
-        )
-
-        # For every analyst/date pair, find that analyst's
-        # most recent target BEFORE OR ON the signal date.
-        matched = pd.merge_asof(
-            grid.sort_values("signal_date"),
-            stock_targets[
-                [
-                    "actdats",
-                    "alysnam",
-                    "value"
-                ]
-            ].sort_values("actdats"),
-            left_on="signal_date",
-            right_on="actdats",
-            by="alysnam",
-            direction="backward",
-            allow_exact_matches=True
-        )
-
-        # How old was that analyst target?
-        matched["target_age_days"] = (
-            matched["signal_date"]
-            -
-            matched["actdats"]
-        ).dt.days
-
-        # Only keep estimates published within our lookback window.
-        matched = matched[
-            (matched["target_age_days"] >= 0)
-            &
-            (
-                matched["target_age_days"]
-                <= lookback_days
-            )
-        ]
-
-        if matched.empty:
-            continue
-
-        consensus = (
-            matched.groupby(
-                ["ticker", "signal_date"]
-            )
-            .agg(
-                consensus_target=("value", "mean"),
-                median_target=("value", "median"),
-                analyst_count=("value", "count"),
-                target_std=("value", "std"),
-                min_target=("value", "min"),
-                max_target=("value", "max"),
-                newest_target_date=("actdats", "max"),
-                oldest_target_date=("actdats", "min")
-            )
-            .reset_index()
-        )
-
-        results.append(consensus)
-
-    if not results:
-        return pd.DataFrame()
-
-    return pd.concat(
-        results,
-        ignore_index=True
-    )
-
-def create_research_panel(
-    weekly,
-    consensus
-):
+def create_research_panel(crsp, analysts):
     """
-    Merge stock momentum/return information with
-    analyst consensus values.
+    Merge CRSP stock-week observations with the analyst
+    consensus available on the same signal date.
     """
 
-    panel = weekly.merge(
-        consensus,
-        on=["ticker", "signal_date"],
+    analyst_columns = [
+        "permno",
+        "signal_date",
+        "consensus_target",
+        "analyst_count",
+        "target_std",
+        "previous_consensus",
+        "target_revision_1w"
+    ]
+
+    panel = crsp.merge(
+        analysts[analyst_columns],
+        on=["permno", "signal_date"],
         how="left"
     )
 
-    # Analysts' expected upside relative to current PRICE
-    panel["target_upside"] = (
-        panel["consensus_target"]
-        /
-        panel["dlyprc"]
-    ) - 1
+    # ------------------------------------------
+    # Analyst-implied valuation measures
+    # ------------------------------------------
 
-    # Actual discount of market price relative to estimated VALUE
-    #
     # Example:
     #
-    # Fair value = $100
-    # Price      = $80
+    # price = 80
+    # consensus value = 100
     #
-    # Discount = 20%
+    # discount = 20%
     #
     panel["discount_to_consensus"] = (
-        panel["consensus_target"]
-        -
-        panel["dlyprc"]
+        panel["consensus_target"] - panel["dlyprc"]
     ) / panel["consensus_target"]
+
+    # This is a related but different measure:
+    #
+    # price = 80
+    # target = 100
+    #
+    # upside = 25%
+    #
+    panel["target_upside"] = (
+        panel["consensus_target"]
+        / panel["dlyprc"]
+    ) - 1
 
     return panel
 
-def analyze_value_momentum(
+
+def calculate_group_statistics(group):
+    """
+    Calculate statistics for one group of stock-week observations.
+    """
+
+    if len(group) == 0:
+        return {
+            "observations": 0,
+            "positive_next_week_rate": float("nan"),
+            "average_next_week_return": float("nan"),
+            "median_next_week_return": float("nan"),
+            "average_excess_return": float("nan")
+        }
+
+    return {
+        "observations": len(group),
+
+        "positive_next_week_rate":
+            (group["next_5d_return"] > 0).mean(),
+
+        "average_next_week_return":
+            group["next_5d_return"].mean(),
+
+        "median_next_week_return":
+            group["next_5d_return"].median(),
+
+        "average_excess_return":
+            group["next_5d_excess_return"].mean()
+    }
+
+
+def test_positive_momentum_and_undervaluation(
     panel,
     discount_threshold=0.20,
-    momentum_threshold=0.03,
+    momentum_threshold=0.00,
     minimum_analysts=3
 ):
     """
-    Test whether stocks with strong positive momentum AND
-    substantial analyst-implied undervaluation are more
-    likely to have positive returns during the following week.
+    Main hypothesis test.
+
+    Question:
+
+    Given that a stock had a positive previous week,
+    is it more likely to have another positive week
+    when it trades at least 20% below analyst consensus value?
 
     Parameters
     ----------
     discount_threshold:
-        Minimum discount to analyst consensus value.
-        0.20 = stock is at least 20% below estimated value.
+        0.20 means market price is at least 20%
+        below analyst consensus value.
 
     momentum_threshold:
-        Minimum previous 5-day return.
-        0.03 = previous week gained at least 3%.
+        0.00 means ANY positive prior five-day return qualifies.
+
+        Later this can easily be changed to:
+            0.01
+            0.03
+            0.05
+            etc.
 
     minimum_analysts:
-        Minimum analyst count required for consensus.
+        Minimum number of analysts required for the
+        consensus estimate.
     """
+
+    # ------------------------------------------
+    # Keep observations with everything required
+    # ------------------------------------------
 
     data = panel.dropna(
         subset=[
             "prior_5d_return",
             "next_5d_return",
+            "consensus_target",
             "discount_to_consensus",
             "analyst_count"
         ]
     ).copy()
 
-    # Avoid calling one analyst's opinion "consensus"
+    # Require a reasonably meaningful consensus
     data = data[
-        data["analyst_count"]
-        >= minimum_analysts
-    ]
-
-    # First-week positive momentum
-    momentum = data[
-        data["prior_5d_return"]
-        >= momentum_threshold
+        data["analyst_count"] >= minimum_analysts
     ].copy()
 
-    # Momentum AND materially undervalued
-    value_momentum = momentum[
-        momentum["discount_to_consensus"]
+    # ------------------------------------------
+    # Positive prior-week momentum
+    # ------------------------------------------
+
+    positive_momentum = data[
+        data["prior_5d_return"] > momentum_threshold
+    ].copy()
+
+    # ------------------------------------------
+    # Divide those stocks by valuation
+    # ------------------------------------------
+
+    undervalued = positive_momentum[
+        positive_momentum["discount_to_consensus"]
         >= discount_threshold
     ].copy()
 
-    # Momentum but NOT sufficiently undervalued
-    momentum_only = momentum[
-        momentum["discount_to_consensus"]
+    not_undervalued = positive_momentum[
+        positive_momentum["discount_to_consensus"]
         < discount_threshold
     ].copy()
 
-    def calculate_stats(group):
+    # ------------------------------------------
+    # Statistics
+    # ------------------------------------------
 
-        if len(group) == 0:
-            return {
-                "observations": 0,
-                "positive_next_week_rate": float("nan"),
-                "average_next_week_return": float("nan"),
-                "median_next_week_return": float("nan")
-            }
-
-        return {
-            "observations": len(group),
-
-            "positive_next_week_rate":
-                (group["next_5d_return"] > 0).mean(),
-
-            "average_next_week_return":
-                group["next_5d_return"].mean(),
-
-            "median_next_week_return":
-                group["next_5d_return"].median()
-        }
-
-    value_stats = calculate_stats(
-        value_momentum
+    undervalued_stats = calculate_group_statistics(
+        undervalued
     )
 
-    momentum_stats = calculate_stats(
-        momentum_only
+    comparison_stats = calculate_group_statistics(
+        not_undervalued
     )
 
-    all_momentum_stats = calculate_stats(
-        momentum
+    all_positive_stats = calculate_group_statistics(
+        positive_momentum
     )
 
-    print("\n========================================")
-    print("VALUE + MOMENTUM ANALYSIS")
-    print("========================================")
+    # ------------------------------------------
+    # Print result
+    # ------------------------------------------
+
+    print("\n================================================")
+    print("POSITIVE MOMENTUM + ANALYST UNDERVALUATION TEST")
+    print("================================================")
 
     print(
-        f"\nMomentum threshold: "
-        f"{momentum_threshold:.1%}"
+        f"\nPrior-week momentum requirement: "
+        f"> {momentum_threshold:.1%}"
     )
 
     print(
-        f"Discount threshold: "
-        f"{discount_threshold:.1%}"
+        f"Undervaluation requirement: "
+        f">= {discount_threshold:.1%}"
     )
 
     print(
@@ -535,229 +279,1116 @@ def analyze_value_momentum(
         f"{minimum_analysts}"
     )
 
-    print(
-        "\n--- MOMENTUM + UNDERVALUED ---"
-    )
+    print("\n----------------------------------------")
+    print("POSITIVE MOMENTUM + >=20% UNDERVALUED")
+    print("----------------------------------------")
 
     print(
         f"Observations: "
-        f"{value_stats['observations']}"
+        f"{undervalued_stats['observations']:,}"
     )
 
     print(
-        "Positive next week: "
-        f"{value_stats['positive_next_week_rate']:.2%}"
+        "Probability next week is positive: "
+        f"{undervalued_stats['positive_next_week_rate']:.2%}"
     )
 
     print(
         "Average next-week return: "
-        f"{value_stats['average_next_week_return']:.2%}"
+        f"{undervalued_stats['average_next_week_return']:.3%}"
     )
 
     print(
         "Median next-week return: "
-        f"{value_stats['median_next_week_return']:.2%}"
+        f"{undervalued_stats['median_next_week_return']:.3%}"
     )
 
     print(
-        "\n--- MOMENTUM BUT NOT UNDERVALUED ---"
+        "Average S&P-adjusted return: "
+        f"{undervalued_stats['average_excess_return']:.3%}"
     )
+
+    print("\n----------------------------------------")
+    print("POSITIVE MOMENTUM + <20% UNDERVALUED")
+    print("----------------------------------------")
 
     print(
         f"Observations: "
-        f"{momentum_stats['observations']}"
+        f"{comparison_stats['observations']:,}"
     )
 
     print(
-        "Positive next week: "
-        f"{momentum_stats['positive_next_week_rate']:.2%}"
+        "Probability next week is positive: "
+        f"{comparison_stats['positive_next_week_rate']:.2%}"
     )
 
     print(
         "Average next-week return: "
-        f"{momentum_stats['average_next_week_return']:.2%}"
+        f"{comparison_stats['average_next_week_return']:.3%}"
     )
 
     print(
         "Median next-week return: "
-        f"{momentum_stats['median_next_week_return']:.2%}"
+        f"{comparison_stats['median_next_week_return']:.3%}"
     )
 
-    if (
-        value_stats["observations"] > 0
-        and
-        momentum_stats["observations"] > 0
-    ):
+    print(
+        "Average S&P-adjusted return: "
+        f"{comparison_stats['average_excess_return']:.3%}"
+    )
 
-        probability_difference = (
-            value_stats[
-                "positive_next_week_rate"
-            ]
-            -
-            momentum_stats[
-                "positive_next_week_rate"
-            ]
-        )
+    # ------------------------------------------
+    # Difference between groups
+    # ------------------------------------------
 
-        return_difference = (
-            value_stats[
-                "average_next_week_return"
-            ]
-            -
-            momentum_stats[
-                "average_next_week_return"
-            ]
-        )
+    probability_difference = (
+        undervalued_stats["positive_next_week_rate"]
+        -
+        comparison_stats["positive_next_week_rate"]
+    )
 
-        print("\n--- DIFFERENCE ---")
+    return_difference = (
+        undervalued_stats["average_next_week_return"]
+        -
+        comparison_stats["average_next_week_return"]
+    )
 
-        print(
-            "Increase in probability of "
-            "positive next week: "
-            f"{probability_difference:.2%}"
-        )
+    excess_return_difference = (
+        undervalued_stats["average_excess_return"]
+        -
+        comparison_stats["average_excess_return"]
+    )
 
-        print(
-            "Difference in average "
-            "next-week return: "
-            f"{return_difference:.2%}"
-        )
+    print("\n========================================")
+    print("DIFFERENCE")
+    print("========================================")
+
+    print(
+        "Difference in probability of positive next week: "
+        f"{probability_difference:+.2%}"
+    )
+
+    print(
+        "Difference in average next-week return: "
+        f"{return_difference:+.3%}"
+    )
+
+    print(
+        "Difference in S&P-adjusted return: "
+        f"{excess_return_difference:+.3%}"
+    )
+
+    print("\n----------------------------------------")
+    print("ALL POSITIVE-MOMENTUM OBSERVATIONS")
+    print("----------------------------------------")
+
+    print(
+        f"Observations: "
+        f"{all_positive_stats['observations']:,}"
+    )
+
+    print(
+        "Probability next week is positive: "
+        f"{all_positive_stats['positive_next_week_rate']:.2%}"
+    )
 
     return {
-        "value_momentum": value_stats,
-        "momentum_only": momentum_stats,
-        "all_momentum": all_momentum_stats
+        "undervalued": undervalued_stats,
+        "not_undervalued": comparison_stats,
+        "all_positive_momentum": all_positive_stats
     }
-def inspect_qualifying_observations(
-    panel,
-    discount_threshold=0.20,
-    momentum_threshold=0.03,
-    minimum_analysts=3
-):
+def add_analysis_buckets(panel):
+    """
+    Create momentum and analyst-discount buckets.
 
-    qualifying = panel[
-        (panel["prior_5d_return"] >= momentum_threshold)
-        &
-        (panel["discount_to_consensus"] >= discount_threshold)
-        &
-        (panel["analyst_count"] >= minimum_analysts)
+    Momentum is based on prior 5-day return.
+    Discount is based on:
+        (consensus_target - price) / consensus_target
+    """
+
+    df = panel.copy()
+
+    # Only keep rows with the data required for this analysis
+    df = df.dropna(
+        subset=[
+            "prior_5d_return",
+            "next_5d_return",
+            "next_5d_excess_return",
+            "discount_to_consensus",
+            "analyst_count"
+        ]
+    )
+
+    # Require a meaningful analyst consensus
+    df = df[
+        df["analyst_count"] >= 3
     ].copy()
 
-    qualifying["year"] = qualifying["signal_date"].dt.year
+    # -----------------------------
+    # Momentum buckets
+    # -----------------------------
+    momentum_bins = [
+        float("-inf"),
+        0.00,
+        0.01,
+        0.03,
+        0.05,
+        0.10,
+        float("inf")
+    ]
 
-    print("\n===== QUALIFYING OBSERVATIONS BY TICKER =====")
-    print(
-        qualifying.groupby("ticker")
-        .size()
-        .sort_values(ascending=False)
+    momentum_labels = [
+        "< 0%",
+        "0% to 1%",
+        "1% to 3%",
+        "3% to 5%",
+        "5% to 10%",
+        ">= 10%"
+    ]
+
+    df["momentum_bucket"] = pd.cut(
+        df["prior_5d_return"],
+        bins=momentum_bins,
+        labels=momentum_labels,
+        right=False
     )
 
-    print("\n===== QUALIFYING OBSERVATIONS BY YEAR =====")
-    print(
-        qualifying.groupby("year")
-        .size()
-        .sort_index()
+    # -----------------------------
+    # Analyst discount buckets
+    # -----------------------------
+    discount_bins = [
+        float("-inf"),
+        0.00,
+        0.10,
+        0.20,
+        0.30,
+        0.40,
+        float("inf")
+    ]
+
+    discount_labels = [
+        "< 0%",
+        "0% to 10%",
+        "10% to 20%",
+        "20% to 30%",
+        "30% to 40%",
+        ">= 40%"
+    ]
+
+    df["discount_bucket"] = pd.cut(
+        df["discount_to_consensus"],
+        bins=discount_bins,
+        labels=discount_labels,
+        right=False
     )
 
-    print("\n===== ACTUAL OBSERVATIONS =====")
+    return df
 
-    print(
-        qualifying[
+
+def build_momentum_discount_matrix(df):
+    """
+    Summarize outcomes for every momentum x discount bucket.
+    """
+
+    grouped = (
+        df.groupby(
             [
-                "ticker",
-                "signal_date",
-                "dlyprc",
-                "prior_5d_return",
-                "consensus_target",
-                "discount_to_consensus",
-                "analyst_count",
-                "next_5d_return"
+                "momentum_bucket",
+                "discount_bucket"
+            ],
+            observed=True
+        )
+        .agg(
+            observations=(
+                "next_5d_return",
+                "size"
+            ),
+
+            positive_next_week_rate=(
+                "next_5d_return",
+                lambda x: (x > 0).mean()
+            ),
+
+            average_next_week_return=(
+                "next_5d_return",
+                "mean"
+            ),
+
+            average_excess_return=(
+                "next_5d_excess_return",
+                "mean"
+            ),
+
+            median_next_week_return=(
+                "next_5d_return",
+                "median"
+            )
+        )
+        .reset_index()
+    )
+
+    return grouped
+
+def print_matrices(results):
+    """
+    Print pivot tables for the major outcomes.
+    """
+
+    probability_matrix = results.pivot(
+        index="momentum_bucket",
+        columns="discount_bucket",
+        values="positive_next_week_rate"
+    )
+
+    return_matrix = results.pivot(
+        index="momentum_bucket",
+        columns="discount_bucket",
+        values="average_next_week_return"
+    )
+
+    excess_matrix = results.pivot(
+        index="momentum_bucket",
+        columns="discount_bucket",
+        values="average_excess_return"
+    )
+
+    count_matrix = results.pivot(
+        index="momentum_bucket",
+        columns="discount_bucket",
+        values="observations"
+    )
+
+    print("\n========================================")
+    print("PROBABILITY NEXT WEEK IS POSITIVE")
+    print("========================================")
+    print(
+        probability_matrix
+        .map(lambda x: f"{x:.2%}" if pd.notna(x) else "")
+    )
+
+    print("\n========================================")
+    print("AVERAGE NEXT-WEEK RETURN")
+    print("========================================")
+    print(
+        return_matrix
+        .map(lambda x: f"{x:.3%}" if pd.notna(x) else "")
+    )
+
+    print("\n========================================")
+    print("AVERAGE S&P-ADJUSTED RETURN")
+    print("========================================")
+    print(
+        excess_matrix
+        .map(lambda x: f"{x:.3%}" if pd.notna(x) else "")
+    )
+
+    print("\n========================================")
+    print("OBSERVATION COUNTS")
+    print("========================================")
+    print(
+        count_matrix.fillna(0).astype(int)
+    )
+
+    return (
+        probability_matrix,
+        return_matrix,
+        excess_matrix,
+        count_matrix
+    )
+def create_probability_heatmap(probability_matrix):
+    """
+    Create a heatmap showing the probability that the next
+    5-day return is positive for each momentum/discount combination.
+    """
+
+    # Convert probabilities from decimals to percentages
+    values = probability_matrix.to_numpy() * 100
+
+    fig, ax = plt.subplots(figsize=(10, 7))
+
+    heatmap = ax.imshow(
+        values,
+        aspect="auto"
+    )
+
+    # Axis labels
+    ax.set_xticks(range(len(probability_matrix.columns)))
+    ax.set_xticklabels(
+        probability_matrix.columns,
+        rotation=45,
+        ha="right"
+    )
+
+    ax.set_yticks(range(len(probability_matrix.index)))
+    ax.set_yticklabels(probability_matrix.index)
+
+    ax.set_xlabel("Discount to Analyst Consensus")
+    ax.set_ylabel("Prior 5-Day Return")
+
+    ax.set_title(
+        "Probability of Positive Next-Week Return\n"
+        "by Prior-Week Momentum and Analyst-Implied Discount"
+    )
+
+    # Put the actual percentage inside every cell
+    for row in range(values.shape[0]):
+        for col in range(values.shape[1]):
+
+            value = values[row, col]
+
+            if pd.notna(value):
+                ax.text(
+                    col,
+                    row,
+                    f"{value:.1f}%",
+                    ha="center",
+                    va="center"
+                )
+
+    # Color scale
+    colorbar = fig.colorbar(
+        heatmap,
+        ax=ax
+    )
+
+    colorbar.set_label(
+        "Probability Next Week Is Positive (%)"
+    )
+
+    plt.tight_layout()
+
+    # Save it for GitHub / README later
+    plt.savefig(
+        "data/momentum_discount_probability_heatmap.png",
+        dpi=300,
+        bbox_inches="tight"
+    )
+
+    plt.show()
+def add_same_week_baseline(panel, min_analysts=3):
+    """
+    Calculate the contemporaneous cross-sectional baseline.
+
+    For every signal_date:
+        baseline = fraction of eligible stocks whose
+        next 5-day return is positive.
+
+    Each stock-week then receives the baseline probability
+    corresponding to its own signal week.
+    """
+
+    df = panel.copy()
+
+    # Same eligible universe used in our analysis
+    df = df.dropna(
+        subset=[
+            "prior_5d_return",
+            "next_5d_return",
+            "discount_to_consensus",
+            "analyst_count"
+        ]
+    )
+
+    df = df[
+        df["analyst_count"] >= min_analysts
+    ].copy()
+
+    # 1 if stock is positive next week, otherwise 0
+    df["next_week_positive"] = (
+        df["next_5d_return"] > 0
+    ).astype(int)
+
+    # For each week, calculate percentage of eligible stocks
+    # that are positive the following week
+    df["same_week_positive_baseline"] = (
+        df.groupby("signal_date")["next_week_positive"]
+        .transform("mean")
+    )
+
+    return df
+def build_same_week_comparison(df):
+    """
+    Compare each momentum/discount bucket against the
+    contemporaneous cross-sectional baseline.
+    """
+
+    df = add_analysis_buckets(df)
+
+    results = (
+        df.groupby(
+            [
+                "momentum_bucket",
+                "discount_bucket"
+            ],
+            observed=True
+        )
+        .agg(
+            observations=(
+                "next_week_positive",
+                "size"
+            ),
+
+            signal_positive_rate=(
+                "next_week_positive",
+                "mean"
+            ),
+
+            average_same_week_baseline=(
+                "same_week_positive_baseline",
+                "mean"
+            ),
+
+            average_next_week_return=(
+                "next_5d_return",
+                "mean"
+            )
+        )
+        .reset_index()
+    )
+
+    # Percentage-point difference
+    results["probability_advantage_pp"] = (
+        results["signal_positive_rate"]
+        -
+        results["average_same_week_baseline"]
+    ) * 100
+
+    return results
+def print_same_week_comparison(results):
+
+    advantage_matrix = results.pivot(
+        index="momentum_bucket",
+        columns="discount_bucket",
+        values="probability_advantage_pp"
+    )
+
+    baseline_matrix = results.pivot(
+        index="momentum_bucket",
+        columns="discount_bucket",
+        values="average_same_week_baseline"
+    )
+
+    signal_matrix = results.pivot(
+        index="momentum_bucket",
+        columns="discount_bucket",
+        values="signal_positive_rate"
+    )
+
+    print("\n========================================")
+    print("SAME-WEEK CROSS-SECTIONAL COMPARISON")
+    print("========================================")
+
+    print("\nSIGNAL POSITIVE RATE:")
+    print(
+        signal_matrix.map(
+            lambda x: f"{x:.2%}" if pd.notna(x) else ""
+        )
+    )
+
+    print("\nAVERAGE SAME-WEEK S&P STOCK BASELINE:")
+    print(
+        baseline_matrix.map(
+            lambda x: f"{x:.2%}" if pd.notna(x) else ""
+        )
+    )
+
+    print("\nADVANTAGE VS SAME-WEEK BASELINE:")
+    print(
+        advantage_matrix.map(
+            lambda x: f"{x:+.2f} pp" if pd.notna(x) else ""
+        )
+    )
+
+    return advantage_matrix
+def create_same_week_advantage_heatmap(
+    advantage_matrix,
+    count_matrix
+):
+
+    values = advantage_matrix.to_numpy()
+
+    fig, ax = plt.subplots(
+        figsize=(11, 7)
+    )
+
+    heatmap = ax.imshow(
+        values,
+        aspect="auto"
+    )
+
+    ax.set_xticks(
+        range(len(advantage_matrix.columns))
+    )
+
+    ax.set_xticklabels(
+        advantage_matrix.columns,
+        rotation=45,
+        ha="right"
+    )
+
+    ax.set_yticks(
+        range(len(advantage_matrix.index))
+    )
+
+    ax.set_yticklabels(
+        advantage_matrix.index
+    )
+
+    ax.set_xlabel(
+        "Discount to Analyst Consensus"
+    )
+
+    ax.set_ylabel(
+        "Prior 5-Day Return"
+    )
+
+    ax.set_title(
+        "Probability Advantage vs Same-Week S&P Stock Baseline"
+    )
+
+    for row in range(values.shape[0]):
+
+        for col in range(values.shape[1]):
+
+            value = values[row, col]
+
+            if pd.notna(value):
+
+                count = int(
+                    count_matrix.iloc[row, col]
+                )
+
+                ax.text(
+                    col,
+                    row,
+                    f"{value:+.2f} pp\n"
+                    f"n={count:,}",
+                    ha="center",
+                    va="center"
+                )
+
+    colorbar = fig.colorbar(
+        heatmap,
+        ax=ax
+    )
+
+    colorbar.set_label(
+        "Probability Advantage (Percentage Points)"
+    )
+
+    plt.tight_layout()
+
+    plt.savefig(
+        "data/same_week_probability_advantage_heatmap.png",
+        dpi=300,
+        bbox_inches="tight"
+    )
+
+    plt.show()
+def test_large_momentum_significance(df):
+    """
+    Test whether stocks with large positive prior-week returns
+    are more or less likely to be positive next week than other
+    eligible S&P 500 stocks during the same week.
+
+    Tests:
+        5% to 10% prior-week return
+        >= 10% prior-week return
+
+    The statistical observations are calendar weeks, not individual
+    stocks.
+    """
+
+    data = df.copy()
+
+    # Make sure required data exists
+    data = data.dropna(
+        subset=[
+            "prior_5d_return",
+            "next_5d_return"
+        ]
+    )
+
+    # Was each stock positive the following week?
+    data["next_week_positive"] = (
+        data["next_5d_return"] > 0
+    ).astype(int)
+
+    # Calculate the overall positive rate for EVERY calendar week
+    weekly_baseline = (
+        data.groupby("signal_date")["next_week_positive"]
+        .mean()
+        .rename("baseline_positive_rate")
+    )
+
+    groups = {
+        "5% to 10%": (
+            (data["prior_5d_return"] >= 0.05)
+            &
+            (data["prior_5d_return"] < 0.10)
+        ),
+
+        ">= 10%": (
+            data["prior_5d_return"] >= 0.10
+        )
+    }
+
+    results = []
+
+    for group_name, condition in groups.items():
+
+        group_data = data[condition].copy()
+
+        # For each calendar week, find what percentage of
+        # stocks in this momentum group went up next week
+        weekly_signal = (
+            group_data
+            .groupby("signal_date")["next_week_positive"]
+            .agg(
+                signal_positive_rate="mean",
+                stock_count="size"
+            )
+        )
+
+        # Attach that week's overall market baseline
+        weekly = weekly_signal.join(
+            weekly_baseline,
+            how="inner"
+        )
+
+        # Difference in probability for each week
+        weekly["advantage"] = (
+            weekly["signal_positive_rate"]
+            -
+            weekly["baseline_positive_rate"]
+        )
+
+        effects = weekly["advantage"]
+
+        n_weeks = len(effects)
+
+        mean_effect = effects.mean()
+
+        std_effect = effects.std(ddof=1)
+
+        standard_error = (
+            std_effect / np.sqrt(n_weeks)
+        )
+
+        # 95% confidence interval
+        critical_value = stats.t.ppf(
+            0.975,
+            df=n_weeks - 1
+        )
+
+        ci_low = (
+            mean_effect
+            -
+            critical_value * standard_error
+        )
+
+        ci_high = (
+            mean_effect
+            +
+            critical_value * standard_error
+        )
+
+        # Test H0: mean effect = 0
+        t_statistic, p_value = stats.ttest_1samp(
+            effects,
+            popmean=0
+        )
+
+        results.append({
+            "momentum_group": group_name,
+            "weeks": n_weeks,
+            "stock_observations": len(group_data),
+            "average_advantage_pp": mean_effect * 100,
+            "ci_low_pp": ci_low * 100,
+            "ci_high_pp": ci_high * 100,
+            "t_statistic": t_statistic,
+            "p_value": p_value
+        })
+
+    results = pd.DataFrame(results)
+
+    print("\n==============================================")
+    print("LARGE MOMENTUM SIGNIFICANCE TEST")
+    print("==============================================")
+
+    for _, row in results.iterrows():
+
+        print(
+            f"\nPrior-week return: {row['momentum_group']}"
+        )
+
+        print(
+            f"Weeks tested: {int(row['weeks']):,}"
+        )
+
+        print(
+            f"Stock observations: "
+            f"{int(row['stock_observations']):,}"
+        )
+
+        print(
+            f"Average same-week probability advantage: "
+            f"{row['average_advantage_pp']:+.2f} pp"
+        )
+
+        print(
+            f"95% confidence interval: "
+            f"[{row['ci_low_pp']:+.2f}, "
+            f"{row['ci_high_pp']:+.2f}] pp"
+        )
+
+        print(
+            f"t-statistic: {row['t_statistic']:.2f}"
+        )
+
+        print(
+            f"p-value: {row['p_value']:.4f}"
+        )
+
+        if row["p_value"] < 0.05:
+
+            if row["average_advantage_pp"] < 0:
+                print(
+                    "Result: statistically significant "
+                    "evidence of reversal."
+                )
+            else:
+                print(
+                    "Result: statistically significant "
+                    "evidence of continuation."
+                )
+
+        else:
+            print(
+                "Result: not statistically significant."
+            )
+
+    return results
+def create_final_momentum_summary(df):
+    """
+    Create the final summary figure showing whether different levels
+    of prior-week momentum predict next-week continuation or reversal
+    relative to stocks trading during the same weeks.
+    """
+
+    data = df.copy()
+
+    data = data.dropna(
+        subset=[
+            "prior_5d_return",
+            "next_5d_return"
+        ]
+    )
+
+    # Define momentum buckets
+    momentum_bins = [
+        -float("inf"),
+        0,
+        0.01,
+        0.03,
+        0.05,
+        0.10,
+        float("inf")
+    ]
+
+    momentum_labels = [
+        "< 0%",
+        "0% to 1%",
+        "1% to 3%",
+        "3% to 5%",
+        "5% to 10%",
+        ">= 10%"
+    ]
+
+    data["momentum_bucket"] = pd.cut(
+        data["prior_5d_return"],
+        bins=momentum_bins,
+        labels=momentum_labels,
+        right=False
+    )
+
+    # 1 = positive following week
+    data["next_week_positive"] = (
+        data["next_5d_return"] > 0
+    ).astype(int)
+
+    # Calculate baseline probability for each calendar week
+    weekly_baseline = (
+        data
+        .groupby("signal_date")["next_week_positive"]
+        .mean()
+        .rename("baseline_positive_rate")
+    )
+
+    # Calculate each momentum bucket's probability
+    # within each calendar week
+    weekly_bucket = (
+        data
+        .groupby(
+            ["signal_date", "momentum_bucket"],
+            observed=True
+        )
+        .agg(
+            bucket_positive_rate=(
+                "next_week_positive",
+                "mean"
+            ),
+            stock_count=(
+                "next_week_positive",
+                "size"
+            )
+        )
+        .reset_index()
+    )
+
+    # Add the corresponding same-week baseline
+    weekly_bucket = weekly_bucket.merge(
+        weekly_baseline,
+        on="signal_date",
+        how="left"
+    )
+
+    # Difference relative to stocks in the same week
+    weekly_bucket["advantage"] = (
+        weekly_bucket["bucket_positive_rate"]
+        -
+        weekly_bucket["baseline_positive_rate"]
+    )
+
+    # Final result for each momentum bucket
+    summary = (
+        weekly_bucket
+        .groupby(
+            "momentum_bucket",
+            observed=True
+        )
+        .agg(
+            average_advantage=("advantage", "mean"),
+            weeks=("signal_date", "nunique"),
+            observations=("stock_count", "sum")
+        )
+        .reset_index()
+    )
+
+    summary["advantage_pp"] = (
+        summary["average_advantage"] * 100
+    )
+
+    print("\n========================================")
+    print("FINAL MOMENTUM SUMMARY")
+    print("========================================")
+
+    print(
+        summary[
+            [
+                "momentum_bucket",
+                "advantage_pp",
+                "observations",
+                "weeks"
             ]
-        ].sort_values("signal_date")
+        ].to_string(index=False)
     )
 
-    return qualifying
+    # ---------- GRAPH ----------
 
-def main():
-
-    # =========================
-    # LOAD DATA
-    # =========================
-
-    crsp = load_crsp_data(CRSP_FILE)
-    ibes = load_ibes_data(IBES_FILE)
-
-    # =========================
-    # CLEAN DATA
-    # =========================
-
-    crsp = clean_crsp_data(crsp)
-    ibes = clean_ibes_data(ibes)
-
-    # =========================
-    # CALCULATE RETURNS
-    # =========================
-
-    crsp = calculate_returns(crsp)
-
-    # =========================
-    # CREATE WEEKLY SIGNAL DATES
-    # =========================
-
-    weekly = create_weekly_signals(crsp)
-
-    print(
-        "\nWeekly observations:",
-        len(weekly)
+    fig, ax = plt.subplots(
+        figsize=(10, 6)
     )
 
-    # =========================
-    # ANALYST CONSENSUS
-    # =========================
-
-    consensus = build_analyst_consensus(
-        weekly,
-        ibes,
-        lookback_days=30
+    bars = ax.bar(
+        summary["momentum_bucket"].astype(str),
+        summary["advantage_pp"]
     )
 
-    print(
-        "Weekly observations with analyst consensus:",
-        len(consensus)
+    # Zero line
+    ax.axhline(
+        0,
+        linewidth=1
     )
 
-    # =========================
-    # MERGE EVERYTHING
-    # =========================
-
-    panel = create_research_panel(
-        weekly,
-        consensus
+    ax.set_xlabel(
+        "Prior 5-Day Stock Return"
     )
 
-    # Save our main research dataset
-    panel.to_csv(
-        "data/weekly_research_panel.csv",
+    ax.set_ylabel(
+        "Next-Week Probability Advantage (Percentage Points)"
+    )
+
+    ax.set_title(
+        "Does Weekly Momentum Continue or Reverse?"
+    )
+
+    # Put values and observation counts on bars
+    # Add labels with enough distance from the bars
+    for bar, (_, row) in zip(
+        bars,
+        summary.iterrows()
+    ):
+
+        value = row["advantage_pp"]
+        count = int(row["observations"])
+
+        if value >= 0:
+            label_y = value + 0.12
+            va = "bottom"
+        else:
+            label_y = value - 0.12
+            va = "top"
+
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            label_y,
+            f"{value:+.2f} pp\nn={count:,}",
+            ha="center",
+            va=va,
+            fontsize=9
+        )
+    ax.set_ylim(
+        summary["advantage_pp"].min() - 0.6,
+        summary["advantage_pp"].max() + 0.6
+    )
+    plt.tight_layout()
+
+    plt.savefig(
+        "results/final_momentum_summary.png",
+        dpi=300,
+        bbox_inches="tight"
+    )
+
+    plt.show()
+
+    # Save underlying results
+    summary.to_csv(
+        "results/final_momentum_summary.csv",
         index=False
     )
 
-    print(
-        "\nSaved research panel to:"
-        " data/weekly_research_panel.csv"
+    return summary
+
+def main():
+
+    print("Loading weekly CRSP data...")
+    crsp = load_crsp(
+        CRSP_FILE
     )
 
-    # =========================
-    # RUN FIRST HYPOTHESIS TEST
-    # =========================
+    print(
+        "CRSP weekly observations:",
+        f"{len(crsp):,}"
+    )
 
-    analyze_value_momentum(
+    print("\nLoading analyst consensus...")
+    analysts = load_analyst_consensus(
+        ANALYST_FILE
+    )
+
+    print(
+        "Analyst weekly observations:",
+        f"{len(analysts):,}"
+    )
+
+    print("\nCreating research panel...")
+
+    panel = create_research_panel(
+        crsp,
+        analysts
+    )
+
+    print(
+        "Merged observations:",
+        f"{len(panel):,}"
+    )
+
+    print(
+        "Observations with analyst consensus:",
+        f"{panel['consensus_target'].notna().sum():,}"
+    )
+
+    # ------------------------------------------
+    # FIRST LARGE-SCALE HYPOTHESIS TEST
+    # ------------------------------------------
+
+    test_positive_momentum_and_undervaluation(
         panel,
         discount_threshold=0.20,
-        momentum_threshold=0.03,
+        momentum_threshold=0.00,
         minimum_analysts=3
     )
 
-    inspect_qualifying_observations(panel)
+    print("\nBuilding momentum x discount analysis...")
+
+    bucketed = add_analysis_buckets(
+        panel
+    )
+
+    matrix_results = build_momentum_discount_matrix(
+        bucketed
+    )
+
+    (
+    probability_matrix,
+    return_matrix,
+    excess_matrix,
+    count_matrix
+    ) = print_matrices(
+        matrix_results
+    )
+
+    matrix_results.to_csv(
+        "data/momentum_discount_matrix_results.csv",
+        index=False
+    )
+
+    create_probability_heatmap(
+        probability_matrix
+    )
+
+    print(
+        "\nSaved matrix results and heatmap."
+    )
+    print(
+    "\nCalculating same-week cross-sectional baseline..."
+    )
+
+    same_week_panel = add_same_week_baseline(
+        panel,
+        min_analysts=3
+    )
+
+    significance_results = test_large_momentum_significance(
+        same_week_panel
+    )
+
+    significance_results.to_csv(
+        "data/large_momentum_significance.csv",
+        index=False
+    )
+
+    same_week_results = build_same_week_comparison(
+        same_week_panel
+    )
+
+    advantage_matrix = print_same_week_comparison(
+        same_week_results
+    )
+
+    create_same_week_advantage_heatmap(
+        advantage_matrix,
+        count_matrix
+    )
+
+    same_week_results.to_csv(
+        "data/same_week_probability_comparison.csv",
+        index=False
+    )
+    final_momentum_summary = create_final_momentum_summary(
+        same_week_panel
+    )
 
 
 if __name__ == "__main__":
